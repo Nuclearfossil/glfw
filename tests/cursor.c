@@ -30,7 +30,13 @@
 //
 //========================================================================
 
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
+
+#if defined(_MSC_VER)
+ // Make MS math.h define M_PI
+ #define _USE_MATH_DEFINES
+#endif
 
 #include <math.h>
 #include <stdio.h>
@@ -41,9 +47,9 @@
 static double cursor_x;
 static double cursor_y;
 static int swap_interval = 1;
-static GLboolean wait_events = GL_FALSE;
-static GLboolean animate_cursor = GL_FALSE;
-static GLboolean track_cursor = GL_FALSE;
+static int wait_events = GLFW_FALSE;
+static int animate_cursor = GLFW_FALSE;
+static int track_cursor = GLFW_FALSE;
 static GLFWcursor* standard_cursors[6];
 
 static void error_callback(int error, const char* description)
@@ -64,7 +70,7 @@ static float star(int x, int y, float t)
     const float xalpha = (float) x == c ? c : k / (float) fabs(x - c);
     const float yalpha = (float) y == c ? c : k / (float) fabs(y - c);
 
-    return fmax(0.f, fmin(1.f, i * salpha * 0.2f + salpha * xalpha * yalpha));
+    return (float) fmax(0.f, fmin(1.f, i * salpha * 0.2f + salpha * xalpha * yalpha));
 }
 
 static GLFWcursor* create_cursor_frame(float t)
@@ -117,7 +123,7 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
         {
             if (glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED)
             {
-                glfwSetWindowShouldClose(window, GL_TRUE);
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
                 break;
             }
 
@@ -147,7 +153,7 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
 
         case GLFW_KEY_W:
             wait_events = !wait_events;
-            printf("(( %sing for events ))\n", wait_events ? "poll" : "wait");
+            printf("(( %sing for events ))\n", wait_events ? "wait" : "poll");
             break;
 
         case GLFW_KEY_T:
@@ -232,6 +238,7 @@ int main(void)
     }
 
     glfwMakeContextCurrent(window);
+    gladLoadGLLoader((GLADloadproc) glfwGetProcAddress);
 
     glfwGetCursorPos(window, &cursor_x, &cursor_y);
     printf("Cursor position: %f %f\n", cursor_x, cursor_y);

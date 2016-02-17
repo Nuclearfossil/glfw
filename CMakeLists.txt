@@ -9,8 +9,8 @@ if (NOT CMAKE_VERSION VERSION_LESS "3.0")
 endif()
 
 set(GLFW_VERSION_MAJOR "3")
-set(GLFW_VERSION_MINOR "1")
-set(GLFW_VERSION_PATCH "2")
+set(GLFW_VERSION_MINOR "2")
+set(GLFW_VERSION_PATCH "0")
 set(GLFW_VERSION_EXTRA "")
 set(GLFW_VERSION "${GLFW_VERSION_MAJOR}.${GLFW_VERSION_MINOR}")
 set(GLFW_VERSION_FULL "${GLFW_VERSION}.${GLFW_VERSION_PATCH}${GLFW_VERSION_EXTRA}")
@@ -30,7 +30,6 @@ if (WIN32)
 endif()
 
 if (APPLE)
-    option(GLFW_BUILD_UNIVERSAL "Build GLFW as a Universal Binary" OFF)
     option(GLFW_USE_CHDIR "Make glfwInit chdir to Contents/Resources" ON)
     option(GLFW_USE_MENUBAR "Populate the menu bar on first window creation" ON)
     option(GLFW_USE_RETINA "Use the full resolution of Retina displays" ON)
@@ -51,6 +50,13 @@ if (BUILD_SHARED_LIBS)
     set(_GLFW_BUILD_DLL 1)
 endif()
 
+if (BUILD_SHARED_LIBS AND UNIX)
+    # On Unix-like systems, shared libraries can use the soname system.
+    set(GLFW_LIB_NAME glfw)
+else()
+    set(GLFW_LIB_NAME glfw3)
+endif()
+
 if (GLFW_USE_WAYLAND)
     set(GLFW_USE_EGL ON)
 elseif (GLFW_USE_MIR)
@@ -59,40 +65,8 @@ endif()
 
 set(CMAKE_MODULE_PATH "${GLFW_SOURCE_DIR}/CMake/modules")
 
-if (GLFW_USE_EGL)
-    set(GLFW_CLIENT_LIBRARY "opengl" CACHE STRING
-        "The client library to use; one of opengl, glesv1 or glesv2")
-
-    if (${GLFW_CLIENT_LIBRARY} STREQUAL "opengl")
-        set(_GLFW_USE_OPENGL 1)
-    elseif (${GLFW_CLIENT_LIBRARY} STREQUAL "glesv1")
-        set(_GLFW_USE_GLESV1 1)
-    elseif (${GLFW_CLIENT_LIBRARY} STREQUAL "glesv2")
-        set(_GLFW_USE_GLESV2 1)
-    else()
-        message(FATAL_ERROR "Unsupported client library")
-    endif()
-
-    find_package(EGL REQUIRED)
-
-    if (NOT _GLFW_USE_OPENGL)
-        set(GLFW_BUILD_EXAMPLES OFF)
-        set(GLFW_BUILD_TESTS OFF)
-        message(STATUS "NOTE: Examples and tests require OpenGL")
-    endif()
-else()
-    set(_GLFW_USE_OPENGL 1)
-endif()
-
-if (_GLFW_USE_OPENGL)
-    find_package(OpenGL REQUIRED)
-elseif (_GLFW_USE_GLESV1)
-    find_package(GLESv1 REQUIRED)
-elseif (_GLFW_USE_GLESV2)
-    find_package(GLESv2 REQUIRED)
-endif()
-
 find_package(Threads REQUIRED)
+find_package(Vulkan)
 
 if (GLFW_BUILD_DOCS)
     set(DOXYGEN_SKIP_DOT TRUE)
@@ -106,23 +80,13 @@ endif()
 #--------------------------------------------------------------------
 # Set compiler specific flags
 #--------------------------------------------------------------------
-if (UNIX)
-    add_definitions(-Wall)
-
-    if (BUILD_SHARED_LIBS)
-        add_definitions(-fvisibility=hidden)
-    endif()
-endif()
-
 if (MSVC)
-    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
-
     if (NOT USE_MSVC_RUNTIME_LIBRARY_DLL)
         foreach (flag CMAKE_C_FLAGS
-                        CMAKE_C_FLAGS_DEBUG
-                        CMAKE_C_FLAGS_RELEASE
-                        CMAKE_C_FLAGS_MINSIZEREL
-                        CMAKE_C_FLAGS_RELWITHDEBINFO)
+                      CMAKE_C_FLAGS_DEBUG
+                      CMAKE_C_FLAGS_RELEASE
+                      CMAKE_C_FLAGS_MINSIZEREL
+                      CMAKE_C_FLAGS_RELWITHDEBINFO)
 
             if (${flag} MATCHES "/MD")
                 string(REGEX REPLACE "/MD" "/MT" ${flag} "${${flag}}")
@@ -159,12 +123,6 @@ if (MINGW)
     if (_GLFW_HAS_64ASLR)
         set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--high-entropy-va ${CMAKE_SHARED_LINKER_FLAGS}")
     endif()
-
-    # HACK: When building on MinGW, WINVER and UNICODE need to be defined before
-    # the inclusion of stddef.h (by glfw3.h), which is itself included before
-    # win32_platform.h.  We define them here until a saner solution can be found
-    # NOTE: MinGW-w64 and Visual C++ do /not/ need this hack.
-    add_definitions(-DUNICODE -DWINVER=0x0501)
 endif()
 
 #--------------------------------------------------------------------
@@ -226,6 +184,11 @@ if (UNIX AND NOT APPLE)
         list(APPEND glfw_LIBRARIES "${MATH_LIBRARY}")
         list(APPEND glfw_PKG_LIBS "-lm")
     endif()
+
+    if (CMAKE_DL_LIBS)
+        list(APPEND glfw_LIBRARIES "${CMAKE_DL_LIBS}")
+        list(APPEND glfw_PKG_LIBS "-l${CMAKE_DL_LIBS}")
+    endif()
 endif()
 
 #--------------------------------------------------------------------
@@ -238,17 +201,6 @@ if (_GLFW_WIN32)
     if (GLFW_USE_HYBRID_HPG)
         set(_GLFW_USE_HYBRID_HPG 1)
     endif()
-endif()
-
-#--------------------------------------------------------------------
-# Use WGL for context creation
-#--------------------------------------------------------------------
-if (_GLFW_WGL)
-
-    list(APPEND glfw_PKG_LIBS "-lopengl32")
-
-    list(APPEND glfw_INCLUDE_DIRS "${OPENGL_INCLUDE_DIR}")
-    list(APPEND glfw_LIBRARIES "${OPENGL_gl_LIBRARY}")
 endif()
 
 #--------------------------------------------------------------------
@@ -363,48 +315,6 @@ if (_GLFW_MIR)
 endif()
 
 #--------------------------------------------------------------------
-# Use GLX for context creation
-#--------------------------------------------------------------------
-if (_GLFW_GLX)
-
-    list(APPEND glfw_INCLUDE_DIRS "${OPENGL_INCLUDE_DIR}")
-    list(APPEND glfw_LIBRARIES "${OPENGL_gl_LIBRARY}")
-
-    list(APPEND glfw_PKG_DEPS "gl")
-
-    if (CMAKE_DL_LIBS)
-        list(APPEND glfw_LIBRARIES "${CMAKE_DL_LIBS}")
-        list(APPEND glfw_PKG_LIBS "-l${CMAKE_DL_LIBS}")
-    endif()
-endif()
-
-#--------------------------------------------------------------------
-# Use EGL for context creation
-#--------------------------------------------------------------------
-if (_GLFW_EGL)
-
-    list(APPEND glfw_INCLUDE_DIRS "${EGL_INCLUDE_DIR}")
-    list(APPEND glfw_LIBRARIES "${EGL_LIBRARY}")
-
-    list(APPEND glfw_PKG_DEPS "egl")
-
-    if (_GLFW_USE_OPENGL)
-        list(APPEND glfw_LIBRARIES "${OPENGL_gl_LIBRARY}")
-        list(APPEND glfw_INCLUDE_DIRS "${OPENGL_INCLUDE_DIR}")
-        list(APPEND glfw_PKG_DEPS "gl")
-    elseif (_GLFW_USE_GLESV1)
-        list(APPEND glfw_LIBRARIES "${GLESv1_LIBRARY}")
-        list(APPEND glfw_INCLUDE_DIRS "${GLESv1_INCLUDE_DIR}")
-        list(APPEND glfw_PKG_DEPS "glesv1_cm")
-    elseif (_GLFW_USE_GLESV2)
-        list(APPEND glfw_LIBRARIES "${GLESv2_LIBRARY}")
-        list(APPEND glfw_INCLUDE_DIRS "${GLESv2_INCLUDE_DIR}")
-        list(APPEND glfw_PKG_DEPS "glesv2")
-    endif()
-
-endif()
-
-#--------------------------------------------------------------------
 # Use Cocoa for window creation and NSOpenGL for context creation
 #--------------------------------------------------------------------
 if (_GLFW_COCOA AND _GLFW_NSGL)
@@ -421,36 +331,30 @@ if (_GLFW_COCOA AND _GLFW_NSGL)
         set(_GLFW_USE_RETINA 1)
     endif()
 
-    if (GLFW_BUILD_UNIVERSAL)
-        message(STATUS "Building GLFW as Universal Binaries")
-        set(CMAKE_OSX_ARCHITECTURES i386;x86_64)
-    else()
-        message(STATUS "Building GLFW only for the native architecture")
-    endif()
-
     # Set up library and include paths
     find_library(COCOA_FRAMEWORK Cocoa)
     find_library(IOKIT_FRAMEWORK IOKit)
     find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation)
     find_library(CORE_VIDEO_FRAMEWORK CoreVideo)
+    find_library(CARBON_FRAMEWORK Carbon)
     mark_as_advanced(COCOA_FRAMEWORK
                      IOKIT_FRAMEWORK
                      CORE_FOUNDATION_FRAMEWORK
-                     CORE_VIDEO_FRAMEWORK)
+                     CORE_VIDEO_FRAMEWORK
+                     CARBON_FRAMEWORK)
     list(APPEND glfw_LIBRARIES "${COCOA_FRAMEWORK}"
-                               "${OPENGL_gl_LIBRARY}"
                                "${IOKIT_FRAMEWORK}"
                                "${CORE_FOUNDATION_FRAMEWORK}"
-                               "${CORE_VIDEO_FRAMEWORK}")
+                               "${CORE_VIDEO_FRAMEWORK}"
+                               "${CARBON_FRAMEWORK}")
 
     set(glfw_PKG_DEPS "")
-    set(glfw_PKG_LIBS "-framework Cocoa -framework OpenGL -framework IOKit -framework CoreFoundation -framework CoreVideo")
+    set(glfw_PKG_LIBS "-framework Cocoa -framework IOKit -framework CoreFoundation -framework CoreVideo -framework Carbon")
 endif()
 
 #--------------------------------------------------------------------
 # Export GLFW library dependencies
 #--------------------------------------------------------------------
-set(GLFW_LIBRARIES ${glfw_LIBRARIES} CACHE STRING "Dependencies of GLFW")
 foreach(arg ${glfw_PKG_DEPS})
     set(GLFW_PKG_DEPS "${GLFW_PKG_DEPS} ${arg}")
 endforeach()
@@ -459,46 +363,28 @@ foreach(arg ${glfw_PKG_LIBS})
 endforeach()
 
 #--------------------------------------------------------------------
-# Choose library output name
-#--------------------------------------------------------------------
-if (BUILD_SHARED_LIBS AND UNIX)
-    # On Unix-like systems, shared libraries can use the soname system.
-    set(GLFW_LIB_NAME glfw)
-else()
-    set(GLFW_LIB_NAME glfw3)
-endif()
-
-#--------------------------------------------------------------------
 # Create generated files
 #--------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 
-if (UNIX)
-    set(GLFW_CONFIG_PATH "${CMAKE_INSTALL_PREFIX}/lib/cmake/glfw3/")
-else()
-    set(GLFW_CONFIG_PATH "${CMAKE_INSTALL_PREFIX}/")
-endif()
+set(GLFW_CONFIG_PATH "lib${LIB_SUFFIX}/cmake/glfw3")
 
-configure_package_config_file("${GLFW_SOURCE_DIR}/src/glfw3Config.cmake.in"
-                              "${GLFW_BINARY_DIR}/src/glfw3Config.cmake"
+configure_package_config_file(src/glfw3Config.cmake.in
+                              src/glfw3Config.cmake
                               INSTALL_DESTINATION "${GLFW_CONFIG_PATH}"
-                              PATH_VARS CMAKE_INSTALL_PREFIX
                               NO_CHECK_REQUIRED_COMPONENTS_MACRO)
 
-write_basic_package_version_file("${GLFW_BINARY_DIR}/src/glfw3ConfigVersion.cmake" 
+write_basic_package_version_file(src/glfw3ConfigVersion.cmake
                                  VERSION ${GLFW_VERSION_FULL}
                                  COMPATIBILITY SameMajorVersion)
 
 if (GLFW_BUILD_DOCS)
-    configure_file("${GLFW_SOURCE_DIR}/docs/Doxyfile.in"
-                   "${GLFW_BINARY_DIR}/docs/Doxyfile" @ONLY)
+    configure_file(docs/Doxyfile.in docs/Doxyfile @ONLY)
 endif()
 
-configure_file("${GLFW_SOURCE_DIR}/src/glfw_config.h.in"
-               "${GLFW_BINARY_DIR}/src/glfw_config.h" @ONLY)
+configure_file(src/glfw_config.h.in src/glfw_config.h @ONLY)
 
-configure_file("${GLFW_SOURCE_DIR}/src/glfw3.pc.in"
-               "${GLFW_BINARY_DIR}/src/glfw3.pc" @ONLY)
+configure_file(src/glfw3.pc.in src/glfw3.pc @ONLY)
 
 #--------------------------------------------------------------------
 # Add subdirectories
@@ -527,16 +413,18 @@ if (GLFW_INSTALL)
 
     install(FILES "${GLFW_BINARY_DIR}/src/glfw3Config.cmake"
                   "${GLFW_BINARY_DIR}/src/glfw3ConfigVersion.cmake"
-            DESTINATION lib${LIB_SUFFIX}/cmake/glfw)
+            DESTINATION "${GLFW_CONFIG_PATH}")
 
-    install(EXPORT glfwTargets DESTINATION lib${LIB_SUFFIX}/cmake/glfw)
+    install(EXPORT glfwTargets FILE glfw3Targets.cmake
+            EXPORT_LINK_INTERFACE_LIBRARIES
+            DESTINATION "${GLFW_CONFIG_PATH}")
     install(FILES "${GLFW_BINARY_DIR}/src/glfw3.pc"
-            DESTINATION lib${LIB_SUFFIX}/pkgconfig)
+            DESTINATION "lib${LIB_SUFFIX}/pkgconfig")
 
     # Only generate this target if no higher-level project already has
     if (NOT TARGET uninstall)
-        configure_file("${GLFW_SOURCE_DIR}/cmake_uninstall.cmake.in"
-                       "${GLFW_BINARY_DIR}/cmake_uninstall.cmake" IMMEDIATE @ONLY)
+        configure_file(cmake_uninstall.cmake.in
+                       cmake_uninstall.cmake IMMEDIATE @ONLY)
 
         add_custom_target(uninstall
                           "${CMAKE_COMMAND}" -P

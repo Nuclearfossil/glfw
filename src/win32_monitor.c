@@ -1,5 +1,5 @@
 //========================================================================
-// GLFW 3.1 Win32 - www.glfw.org
+// GLFW 3.2 Win32 - www.glfw.org
 //------------------------------------------------------------------------
 // Copyright (c) 2002-2006 Marcus Geelnard
 // Copyright (c) 2006-2010 Camilla Berglund <elmindreda@elmindreda.org>
@@ -47,7 +47,7 @@
 
 // Change the current video mode
 //
-GLboolean _glfwSetVideoMode(_GLFWmonitor* monitor, const GLFWvidmode* desired)
+GLFWbool _glfwSetVideoModeWin32(_GLFWmonitor* monitor, const GLFWvidmode* desired)
 {
     GLFWvidmode current;
     const GLFWvidmode* best;
@@ -56,7 +56,7 @@ GLboolean _glfwSetVideoMode(_GLFWmonitor* monitor, const GLFWvidmode* desired)
     best = _glfwChooseVideoMode(monitor, desired);
     _glfwPlatformGetVideoMode(monitor, &current);
     if (_glfwCompareVideoModes(&current, best) == 0)
-        return GL_TRUE;
+        return GLFW_TRUE;
 
     ZeroMemory(&dm, sizeof(dm));
     dm.dmSize = sizeof(DEVMODEW);
@@ -77,22 +77,22 @@ GLboolean _glfwSetVideoMode(_GLFWmonitor* monitor, const GLFWvidmode* desired)
                                  NULL) != DISP_CHANGE_SUCCESSFUL)
     {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Win32: Failed to set video mode");
-        return GL_FALSE;
+        return GLFW_FALSE;
     }
 
-    monitor->win32.modeChanged = GL_TRUE;
-    return GL_TRUE;
+    monitor->win32.modeChanged = GLFW_TRUE;
+    return GLFW_TRUE;
 }
 
 // Restore the previously saved (original) video mode
 //
-void _glfwRestoreVideoMode(_GLFWmonitor* monitor)
+void _glfwRestoreVideoModeWin32(_GLFWmonitor* monitor)
 {
     if (monitor->win32.modeChanged)
     {
         ChangeDisplaySettingsExW(monitor->win32.adapterName,
                                  NULL, NULL, CDS_FULLSCREEN, NULL);
-        monitor->win32.modeChanged = GL_FALSE;
+        monitor->win32.modeChanged = GLFW_FALSE;
     }
 }
 
@@ -112,6 +112,8 @@ _GLFWmonitor** _glfwPlatformGetMonitors(int* count)
     for (adapterIndex = 0;  ;  adapterIndex++)
     {
         DISPLAY_DEVICEW adapter;
+        int widthMM, heightMM;
+        HDC dc;
 
         ZeroMemory(&adapter, sizeof(DISPLAY_DEVICEW));
         adapter.cb = sizeof(DISPLAY_DEVICEW);
@@ -122,12 +124,16 @@ _GLFWmonitor** _glfwPlatformGetMonitors(int* count)
         if (!(adapter.StateFlags & DISPLAY_DEVICE_ACTIVE))
             continue;
 
+        dc = CreateDCW(L"DISPLAY", adapter.DeviceName, NULL, NULL);
+        widthMM  = GetDeviceCaps(dc, HORZSIZE);
+        heightMM = GetDeviceCaps(dc, VERTSIZE);
+        DeleteDC(dc);
+
         for (displayIndex = 0;  ;  displayIndex++)
         {
             DISPLAY_DEVICEW display;
             _GLFWmonitor* monitor;
             char* name;
-            HDC dc;
 
             ZeroMemory(&display, sizeof(DISPLAY_DEVICEW));
             display.cb = sizeof(DISPLAY_DEVICEW);
@@ -135,7 +141,7 @@ _GLFWmonitor** _glfwPlatformGetMonitors(int* count)
             if (!EnumDisplayDevicesW(adapter.DeviceName, displayIndex, &display, 0))
                 break;
 
-            name = _glfwCreateUTF8FromWideString(display.DeviceString);
+            name = _glfwCreateUTF8FromWideStringWin32(display.DeviceString);
             if (!name)
             {
                 _glfwInputError(GLFW_PLATFORM_ERROR,
@@ -143,14 +149,11 @@ _GLFWmonitor** _glfwPlatformGetMonitors(int* count)
                 continue;
             }
 
-            dc = CreateDCW(L"DISPLAY", adapter.DeviceName, NULL, NULL);
-
-            monitor = _glfwAllocMonitor(name,
-                                        GetDeviceCaps(dc, HORZSIZE),
-                                        GetDeviceCaps(dc, VERTSIZE));
-
-            DeleteDC(dc);
+            monitor = _glfwAllocMonitor(name, widthMM, heightMM);
             free(name);
+
+            if (adapter.StateFlags & DISPLAY_DEVICE_MODESPRUNED)
+                monitor->win32.modesPruned = GLFW_TRUE;
 
             wcscpy(monitor->win32.adapterName, adapter.DeviceName);
             wcscpy(monitor->win32.displayName, display.DeviceName);
@@ -183,7 +186,7 @@ _GLFWmonitor** _glfwPlatformGetMonitors(int* count)
     return monitors;
 }
 
-GLboolean _glfwPlatformIsSameMonitor(_GLFWmonitor* first, _GLFWmonitor* second)
+GLFWbool _glfwPlatformIsSameMonitor(_GLFWmonitor* first, _GLFWmonitor* second)
 {
     return wcscmp(first->win32.displayName, second->win32.displayName) == 0;
 }
@@ -226,15 +229,6 @@ GLFWvidmode* _glfwPlatformGetVideoModes(_GLFWmonitor* monitor, int* count)
 
         modeIndex++;
 
-        if (ChangeDisplaySettingsExW(monitor->win32.adapterName,
-                                    &dm,
-                                    NULL,
-                                    CDS_TEST,
-                                    NULL) != DISP_CHANGE_SUCCESSFUL)
-        {
-            continue;
-        }
-
         // Skip modes with less than 15 BPP
         if (dm.dmBitsPerPel < 15)
             continue;
@@ -257,18 +251,35 @@ GLFWvidmode* _glfwPlatformGetVideoModes(_GLFWmonitor* monitor, int* count)
         if (i < *count)
             continue;
 
+        if (monitor->win32.modesPruned)
+        {
+            // Skip modes not supported by the connected displays
+            if (ChangeDisplaySettingsExW(monitor->win32.adapterName,
+                                         &dm,
+                                         NULL,
+                                         CDS_TEST,
+                                         NULL) != DISP_CHANGE_SUCCESSFUL)
+            {
+                continue;
+            }
+        }
+
         if (*count == size)
         {
-            if (*count)
-                size *= 2;
-            else
-                size = 128;
-
+            size += 128;
             result = (GLFWvidmode*) realloc(result, size * sizeof(GLFWvidmode));
         }
 
         (*count)++;
         result[*count - 1] = mode;
+    }
+
+    if (!*count)
+    {
+        // HACK: Report the current mode if no valid modes were found
+        result = calloc(1, sizeof(GLFWvidmode));
+        _glfwPlatformGetVideoMode(monitor, result);
+        *count = 1;
     }
 
     return result;
