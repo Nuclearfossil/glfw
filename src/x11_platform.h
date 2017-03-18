@@ -1,8 +1,8 @@
 //========================================================================
-// GLFW 3.2 X11 - www.glfw.org
+// GLFW 3.3 X11 - www.glfw.org
 //------------------------------------------------------------------------
 // Copyright (c) 2002-2006 Marcus Geelnard
-// Copyright (c) 2006-2010 Camilla Berglund <elmindreda@elmindreda.org>
+// Copyright (c) 2006-2016 Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
 // warranty. In no event will the authors be held liable for any damages
@@ -47,20 +47,27 @@
 // The Xinerama extension provides legacy monitor indices
 #include <X11/extensions/Xinerama.h>
 
-#if defined(_GLFW_HAS_XINPUT)
- // The XInput2 extension provides improved input events
- #include <X11/extensions/XInput2.h>
-#endif
-
-#if defined(_GLFW_HAS_XF86VM)
- // The Xf86VidMode extension provides fallback gamma control
- #include <X11/extensions/xf86vmode.h>
-#endif
+// The XInput extension provides raw mouse motion input
+#include <X11/extensions/XInput2.h>
 
 typedef XID xcb_window_t;
 typedef XID xcb_visualid_t;
 typedef struct xcb_connection_t xcb_connection_t;
-typedef xcb_connection_t* (* XGETXCBCONNECTION_T)(Display*);
+typedef xcb_connection_t* (* PFN_XGetXCBConnection)(Display*);
+
+typedef Bool (* PFN_XF86VidModeQueryExtension)(Display*,int*,int*);
+typedef Bool (* PFN_XF86VidModeGetGammaRamp)(Display*,int,int,unsigned short*,unsigned short*,unsigned short*);
+typedef Bool (* PFN_XF86VidModeSetGammaRamp)(Display*,int,int,unsigned short*,unsigned short*,unsigned short*);
+typedef Bool (* PFN_XF86VidModeGetGammaRampSize)(Display*,int,int*);
+#define XF86VidModeQueryExtension _glfw.x11.vidmode.QueryExtension
+#define XF86VidModeGetGammaRamp _glfw.x11.vidmode.GetGammaRamp
+#define XF86VidModeSetGammaRamp _glfw.x11.vidmode.SetGammaRamp
+#define XF86VidModeGetGammaRampSize _glfw.x11.vidmode.GetGammaRampSize
+
+typedef Status (* PFN_XIQueryVersion)(Display*,int*,int*);
+typedef int (* PFN_XISelectEvents)(Display*,Window,XIEventMask*,int);
+#define XIQueryVersion _glfw.x11.xi.QueryVersion
+#define XISelectEvents _glfw.x11.xi.SelectEvents
 
 typedef VkFlags VkXlibSurfaceCreateFlagsKHR;
 typedef VkFlags VkXcbSurfaceCreateFlagsKHR;
@@ -90,22 +97,22 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceXcbPresentationSupportKHR)(Vk
 
 #include "posix_tls.h"
 #include "posix_time.h"
-#include "linux_joystick.h"
 #include "xkb_unicode.h"
-
-#if defined(_GLFW_GLX)
- #include "glx_context.h"
-#elif defined(_GLFW_EGL)
- #define _GLFW_EGL_NATIVE_WINDOW  ((EGLNativeWindowType) window->x11.handle)
- #define _GLFW_EGL_NATIVE_DISPLAY ((EGLNativeDisplayType) _glfw.x11.display)
- #include "egl_context.h"
+#include "glx_context.h"
+#include "egl_context.h"
+#include "osmesa_context.h"
+#if defined(__linux__)
+#include "linux_joystick.h"
 #else
- #error "No supported context creation API selected"
+#include "null_joystick.h"
 #endif
 
 #define _glfw_dlopen(name) dlopen(name, RTLD_LAZY | RTLD_LOCAL)
 #define _glfw_dlclose(handle) dlclose(handle)
 #define _glfw_dlsym(handle, name) dlsym(handle, name)
+
+#define _GLFW_EGL_NATIVE_WINDOW  ((EGLNativeWindowType) window->x11.handle)
+#define _GLFW_EGL_NATIVE_DISPLAY ((EGLNativeDisplayType) _glfw.x11.display)
 
 #define _GLFW_PLATFORM_WINDOW_STATE         _GLFWwindowX11  x11
 #define _GLFW_PLATFORM_LIBRARY_WINDOW_STATE _GLFWlibraryX11 x11
@@ -121,23 +128,24 @@ typedef struct _GLFWwindowX11
     Window          handle;
     XIC             ic;
 
+    GLFWbool        overrideRedirect;
+    GLFWbool        iconified;
+    GLFWbool        maximized;
+
     // Cached position and size used to filter out duplicate events
     int             width, height;
     int             xpos, ypos;
 
     // The last received cursor position, regardless of source
-    double          cursorPosX, cursorPosY;
+    int             lastCursorPosX, lastCursorPosY;
     // The last position the cursor was warped to by GLFW
-    int             warpPosX, warpPosY;
+    int             warpCursorPosX, warpCursorPosY;
 
     // The information from the last KeyPress event
-    struct {
-        unsigned int keycode;
-        Time         time;
-    } last;
+    unsigned int    lastKeyCode;
+    Time            lastKeyTime;
 
 } _GLFWwindowX11;
-
 
 // X11-specific global data
 //
@@ -147,8 +155,10 @@ typedef struct _GLFWlibraryX11
     int             screen;
     Window          root;
 
+    // Helper window for IPC
+    Window          helperWindowHandle;
     // Invisible cursor for hidden cursor mode
-    Cursor          cursor;
+    Cursor          hiddenCursorHandle;
     // Context for mapping window XIDs to _GLFWwindow pointers
     XContext        context;
     // XIM input method
@@ -160,9 +170,13 @@ typedef struct _GLFWlibraryX11
     // Key name string
     char            keyName[64];
     // X11 keycode to GLFW key LUT
-    short int       publicKeys[256];
+    short int       keycodes[256];
     // GLFW key to X11 keycode LUT
-    short int       nativeKeys[GLFW_KEY_LAST + 1];
+    short int       scancodes[GLFW_KEY_LAST + 1];
+    // Where to place the cursor when re-enabled
+    double          restoreCursorPosX, restoreCursorPosY;
+    // The window whose disabled cursor mode is active
+    _GLFWwindow*    disabledCursorWindow;
 
     // Window manager atoms
     Atom            WM_PROTOCOLS;
@@ -170,11 +184,16 @@ typedef struct _GLFWlibraryX11
     Atom            WM_DELETE_WINDOW;
     Atom            NET_WM_NAME;
     Atom            NET_WM_ICON_NAME;
+    Atom            NET_WM_ICON;
     Atom            NET_WM_PID;
     Atom            NET_WM_PING;
+    Atom            NET_WM_WINDOW_TYPE;
+    Atom            NET_WM_WINDOW_TYPE_NORMAL;
     Atom            NET_WM_STATE;
     Atom            NET_WM_STATE_ABOVE;
     Atom            NET_WM_STATE_FULLSCREEN;
+    Atom            NET_WM_STATE_MAXIMIZED_VERT;
+    Atom            NET_WM_STATE_MAXIMIZED_HORZ;
     Atom            NET_WM_BYPASS_COMPOSITOR;
     Atom            NET_WM_FULLSCREEN_MONITORS;
     Atom            NET_ACTIVE_WINDOW;
@@ -189,9 +208,10 @@ typedef struct _GLFWlibraryX11
     Atom            XdndStatus;
     Atom            XdndActionCopy;
     Atom            XdndDrop;
-    Atom            XdndLeave;
     Atom            XdndFinished;
     Atom            XdndSelection;
+    Atom            XdndTypeList;
+    Atom            text_uri_list;
 
     // Selection (clipboard) atoms
     Atom            TARGETS;
@@ -234,7 +254,9 @@ typedef struct _GLFWlibraryX11
     } saver;
 
     struct {
+        int         version;
         Window      source;
+        Atom        format;
     } xdnd;
 
     struct {
@@ -245,30 +267,33 @@ typedef struct _GLFWlibraryX11
 
     struct {
         void*       handle;
-        XGETXCBCONNECTION_T XGetXCBConnection;
+        PFN_XGetXCBConnection XGetXCBConnection;
     } x11xcb;
 
-#if defined(_GLFW_HAS_XINPUT)
     struct {
         GLFWbool    available;
+        void*       handle;
+        int         eventBase;
+        int         errorBase;
+        PFN_XF86VidModeQueryExtension QueryExtension;
+        PFN_XF86VidModeGetGammaRamp GetGammaRamp;
+        PFN_XF86VidModeSetGammaRamp SetGammaRamp;
+        PFN_XF86VidModeGetGammaRampSize GetGammaRampSize;
+    } vidmode;
+
+    struct {
+        GLFWbool    available;
+        void*       handle;
         int         majorOpcode;
         int         eventBase;
         int         errorBase;
         int         major;
         int         minor;
+        PFN_XIQueryVersion QueryVersion;
+        PFN_XISelectEvents SelectEvents;
     } xi;
-#endif /*_GLFW_HAS_XINPUT*/
-
-#if defined(_GLFW_HAS_XF86VM)
-    struct {
-        GLFWbool    available;
-        int         eventBase;
-        int         errorBase;
-    } vidmode;
-#endif /*_GLFW_HAS_XF86VM*/
 
 } _GLFWlibraryX11;
-
 
 // X11-specific per-monitor data
 //
@@ -284,7 +309,6 @@ typedef struct _GLFWmonitorX11
 
 } _GLFWmonitorX11;
 
-
 // X11-specific per-cursor data
 //
 typedef struct _GLFWcursorX11
@@ -294,6 +318,7 @@ typedef struct _GLFWcursorX11
 } _GLFWcursorX11;
 
 
+void _glfwPollMonitorsX11(void);
 GLFWbool _glfwSetVideoModeX11(_GLFWmonitor* monitor, const GLFWvidmode* desired);
 void _glfwRestoreVideoModeX11(_GLFWmonitor* monitor);
 
@@ -307,5 +332,7 @@ unsigned long _glfwGetWindowPropertyX11(Window window,
 void _glfwGrabErrorHandlerX11(void);
 void _glfwReleaseErrorHandlerX11(void);
 void _glfwInputErrorX11(int error, const char* message);
+
+void _glfwPushSelectionToManagerX11(void);
 
 #endif // _glfw3_x11_platform_h_

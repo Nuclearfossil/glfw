@@ -1,5 +1,5 @@
 //========================================================================
-// GLFW 3.2 Wayland - www.glfw.org
+// GLFW 3.3 Wayland - www.glfw.org
 //------------------------------------------------------------------------
 // Copyright (c) 2014 Jonas Ådahl <jadahl@gmail.com>
 //
@@ -29,6 +29,7 @@
 
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-compose.h>
 #include <dlfcn.h>
 
 typedef VkFlags VkWaylandSurfaceCreateFlagsKHR;
@@ -49,12 +50,11 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR
 #include "posix_time.h"
 #include "linux_joystick.h"
 #include "xkb_unicode.h"
+#include "egl_context.h"
+#include "osmesa_context.h"
 
-#if defined(_GLFW_EGL)
- #include "egl_context.h"
-#else
- #error "The Wayland backend depends on EGL platform support"
-#endif
+#include "wayland-relative-pointer-unstable-v1-client-protocol.h"
+#include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
 
 #define _glfw_dlopen(name) dlopen(name, RTLD_LAZY | RTLD_LOCAL)
 #define _glfw_dlclose(handle) dlclose(handle)
@@ -68,10 +68,8 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR
 #define _GLFW_PLATFORM_MONITOR_STATE        _GLFWmonitorWayland wl
 #define _GLFW_PLATFORM_CURSOR_STATE         _GLFWcursorWayland  wl
 
-
-// Wayland-specific video mode data
-//
-typedef struct _GLFWvidmodeWayland _GLFWvidmodeWayland;
+#define _GLFW_PLATFORM_CONTEXT_STATE
+#define _GLFW_PLATFORM_LIBRARY_CONTEXT_STATE
 
 
 // Wayland-specific per-window data
@@ -80,13 +78,16 @@ typedef struct _GLFWwindowWayland
 {
     int                         width, height;
     GLFWbool                    visible;
+    GLFWbool                    maximized;
     struct wl_surface*          surface;
     struct wl_egl_window*       native;
-    struct wl_shell_surface*    shell_surface;
+    struct wl_shell_surface*    shellSurface;
     struct wl_callback*         callback;
 
     _GLFWcursor*                currentCursor;
     double                      cursorPosX, cursorPosY;
+
+    char*                       title;
 
     // We need to track the monitors the window spans on to calculate the
     // optimal scaling factor.
@@ -95,8 +96,11 @@ typedef struct _GLFWwindowWayland
     int                         monitorsCount;
     int                         monitorsSize;
 
+    struct {
+        struct zwp_relative_pointer_v1*    relativePointer;
+        struct zwp_locked_pointer_v1*      lockedPointer;
+    } pointerLock;
 } _GLFWwindowWayland;
-
 
 // Wayland-specific global data
 //
@@ -110,27 +114,27 @@ typedef struct _GLFWlibraryWayland
     struct wl_seat*             seat;
     struct wl_pointer*          pointer;
     struct wl_keyboard*         keyboard;
+    struct zwp_relative_pointer_manager_v1* relativePointerManager;
+    struct zwp_pointer_constraints_v1*      pointerConstraints;
 
-    int                         wl_compositor_version;
+    int                         compositorVersion;
 
     struct wl_cursor_theme*     cursorTheme;
     struct wl_surface*          cursorSurface;
     uint32_t                    pointerSerial;
 
-    _GLFWmonitor**              monitors;
-    int                         monitorsCount;
-    int                         monitorsSize;
-
-    short int                   publicKeys[256];
+    short int                   keycodes[256];
+    short int                   scancodes[GLFW_KEY_LAST + 1];
 
     struct {
         struct xkb_context*     context;
         struct xkb_keymap*      keymap;
         struct xkb_state*       state;
-        xkb_mod_mask_t          control_mask;
-        xkb_mod_mask_t          alt_mask;
-        xkb_mod_mask_t          shift_mask;
-        xkb_mod_mask_t          super_mask;
+        struct xkb_compose_state* composeState;
+        xkb_mod_mask_t          controlMask;
+        xkb_mod_mask_t          altMask;
+        xkb_mod_mask_t          shiftMask;
+        xkb_mod_mask_t          superMask;
         unsigned int            modifiers;
     } xkb;
 
@@ -139,23 +143,18 @@ typedef struct _GLFWlibraryWayland
 
 } _GLFWlibraryWayland;
 
-
 // Wayland-specific per-monitor data
 //
 typedef struct _GLFWmonitorWayland
 {
     struct wl_output*           output;
-
-    _GLFWvidmodeWayland*        modes;
-    int                         modesCount;
-    int                         modesSize;
-    GLFWbool                    done;
+    int                         currentMode;
 
     int                         x;
     int                         y;
     int                         scale;
-} _GLFWmonitorWayland;
 
+} _GLFWmonitorWayland;
 
 // Wayland-specific per-cursor data
 //
